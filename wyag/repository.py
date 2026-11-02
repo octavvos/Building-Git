@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import configparser
 import os
 
@@ -5,14 +7,14 @@ import os
 class GitRepository:
     """A Git repository: a working tree plus its .git directory."""
 
-    def __init__(self, path, force=False):
+    def __init__(self, path: str, force: bool = False) -> None:
         self.worktree = path
         self.gitdir = os.path.join(path, ".git")
 
         if not (force or os.path.isdir(self.gitdir)):
             raise Exception(f"Not a Git repository {path}")
 
-        self.conf = None
+        self.conf: configparser.ConfigParser | None = None
         config_file = self.repo_file("config")
         if os.path.exists(config_file):
             self.conf = configparser.ConfigParser()
@@ -25,17 +27,17 @@ class GitRepository:
             if version != 0:
                 raise Exception(f"Unsupported repositoryformatversion {version}")
 
-    def repo_path(self, *path):
+    def repo_path(self, *path: str) -> str:
         """Path inside .git."""
         return os.path.join(self.gitdir, *path)
 
-    def repo_file(self, *path, mkdir=False):
+    def repo_file(self, *path: str, mkdir: bool = False) -> str:
         """Path inside .git; create its parent directory if mkdir is set."""
         if mkdir:
             self.repo_dir(*path[:-1], mkdir=True)
         return self.repo_path(*path)
 
-    def repo_dir(self, *path, mkdir=False):
+    def repo_dir(self, *path: str, mkdir: bool = False) -> str | None:
         """Directory inside .git; return None if it is missing and mkdir is off."""
         full = self.repo_path(*path)
         if os.path.exists(full):
@@ -48,7 +50,7 @@ class GitRepository:
         return None
 
 
-def repo_create(path):
+def repo_create(path: str) -> GitRepository:
     """Create a new repository at path."""
     repo = GitRepository(path, True)
 
@@ -78,7 +80,7 @@ def repo_create(path):
     return repo
 
 
-def repo_default_config():
+def repo_default_config() -> configparser.ConfigParser:
     ret = configparser.ConfigParser()
     ret.add_section("core")
     ret.set("core", "repositoryformatversion", "0")
@@ -87,7 +89,7 @@ def repo_default_config():
     return ret
 
 
-def repo_find(path=".", required=True):
+def repo_find(path: str = ".", required: bool = True) -> GitRepository | None:
     """Walk up from path until a directory containing .git is found."""
     path = os.path.realpath(path)
 
