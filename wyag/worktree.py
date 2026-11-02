@@ -136,7 +136,7 @@ class Status:
     def __init__(self) -> None:
         self.staged: dict[str, str] = {}    # path -> A / M / D (HEAD vs index)
         self.unstaged: dict[str, str] = {}  # path -> M / D (index vs worktree)
-        self.unmerged: list[str] = []
+        self.unmerged: dict[str, str] = {}  # path -> UU / AA / UD / DU / ...
         self.untracked: list[str] = []
 
     @property
@@ -167,11 +167,22 @@ def worktree_changed(repo: GitRepository, entry: GitIndexEntry, index_mtime: int
     return None if sha == entry.sha else "M"
 
 
+# Which conflict stages a path has (1 base, 2 ours, 3 theirs) -> git's code.
+UNMERGED_CODES = {
+    (1, 2, 3): "UU", (2, 3): "AA", (1, 2): "UD", (1, 3): "DU",
+    (2,): "AU", (3,): "UA", (1,): "DD",
+}
+
+
 def status(repo: GitRepository) -> Status:
     result = Status()
     index = index_read(repo)
     entries = index.by_path()
-    result.unmerged = sorted({e.path for e in index.entries if e.stage > 0})
+    stages: dict[str, list[int]] = {}
+    for e in index.entries:
+        if e.stage > 0:
+            stages.setdefault(e.path, []).append(e.stage)
+    result.unmerged = {p: UNMERGED_CODES[tuple(sorted(s))] for p, s in sorted(stages.items())}
 
     head = head_files(repo)
     for path in sorted(set(head) | set(entries)):
@@ -324,6 +335,13 @@ def remove_worktree_file(repo: GitRepository, path: str) -> None:
             break  # not empty
 
 
+def make_executable(path: str) -> None:
+    """chmod +x the way git does it: full permissions minus the user's umask."""
+    umask = os.umask(0)
+    os.umask(umask)
+    os.chmod(path, 0o777 & ~umask)
+
+
 def write_worktree_file(repo: GitRepository, path: str, mode: int, data: bytes) -> GitIndexEntry:
     """Write a file (or symlink) and return an index entry describing it."""
     full = os.path.join(repo.worktree, path)
@@ -338,7 +356,8 @@ def write_worktree_file(repo: GitRepository, path: str, mode: int, data: bytes) 
     else:
         with open(full, "wb") as f:
             f.write(data)
-        os.chmod(full, 0o755 if mode == 0o100755 else 0o644)
+        if mode == 0o100755:
+            make_executable(full)
     sha = objects.object_write(GitBlob(data))
     return GitIndexEntry.from_stat(path, sha, mode, os.lstat(full))
 
@@ -430,9 +449,28 @@ def checkout_tree(repo: GitRepository, target: dict[str, FileState], action: str
 
 # --- commit ---
 
-def commit(repo: GitRepository, message: str) -> tuple[str, str]:
+def stage_tracked(repo: GitRepository) -> None:
+    """Stage every change to tracked files, like `git commit -a`."""
+    index = index_read(repo)
+    entries = index.by_path()
+    index_file = repo.repo_file("index")
+    index_mtime = int(os.stat(index_file).st_mtime) if os.path.exists(index_file) else 0
+    trust_exec = trust_exec_bit(repo)
+    for path, entry in list(entries.items()):
+        change = worktree_changed(repo, entry, index_mtime, trust_exec)
+        if change == "D":
+            del entries[path]
+        elif change == "M":
+            stage_file(repo, entries, path, trust_exec)
+    index_write(repo, GitIndex(list(entries.values())
+                               + [e for e in index.entries if e.stage > 0]))
+
+
+def commit(repo: GitRepository, message: str,
+           parents: list[str] | None = None) -> tuple[str, str]:
     """Create a commit from the index and move the current branch to it.
 
+    Parents default to HEAD, plus MERGE_HEAD when a merge is being concluded.
     Returns the new commit's hash and the line git prints, e.g.
     "[master 1a2b3c4] Fix bug".
     """
@@ -443,16 +481,24 @@ def commit(repo: GitRepository, message: str) -> tuple[str, str]:
         raise Exception("Aborting commit due to empty commit message.")
 
     tree = write_tree(repo, index.entries)
-    parent = ref_resolve(repo, "HEAD")
-    if parent and objects.object_find(repo, parent, fmt=b"tree") == tree:
+    merge_head = repo.repo_file("MERGE_HEAD")
+    if parents is None:
+        head = ref_resolve(repo, "HEAD")
+        parents = [head] if head else []
+        if os.path.exists(merge_head):
+            with open(merge_head) as f:
+                parents.append(f.read().strip())
+
+    # A merge commit may have the same tree as HEAD; a normal commit may not.
+    if len(parents) == 1 and objects.object_find(repo, parents[0], fmt=b"tree") == tree:
         raise Exception("nothing to commit, working tree clean")
-    if not parent and not index.entries:
+    if not parents and not index.entries:
         raise Exception("nothing to commit (create/copy files and use \"wyag add\" to track)")
 
     c = GitCommit()
     c.kvlm = {b"tree": [tree.encode()]}
-    if parent:
-        c.kvlm[b"parent"] = [parent.encode()]
+    if parents:
+        c.kvlm[b"parent"] = [p.encode() for p in parents]
     c.kvlm[b"author"] = [identity(repo, "AUTHOR")]
     c.kvlm[b"committer"] = [identity(repo, "COMMITTER")]
     c.kvlm[None] = message.encode()
@@ -468,6 +514,10 @@ def commit(repo: GitRepository, message: str) -> tuple[str, str]:
     with open(ref, "w") as f:
         f.write(sha + "\n")
 
-    root = "" if parent else " (root-commit)"
+    for name in ("MERGE_HEAD", "MERGE_MSG"):
+        if os.path.exists(repo.repo_file(name)):
+            os.remove(repo.repo_file(name))
+
+    root = "" if parents else " (root-commit)"
     first_line = message.split("\n", 1)[0]
     return sha, f"[{label}{root} {sha[:7]}] {first_line}"
