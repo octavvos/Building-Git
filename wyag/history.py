@@ -52,17 +52,18 @@ class CommitGraph:
         themselves ancestors of another common ancestor. Newest first."""
         common = self.ancestors(a) & self.ancestors(b)
 
-        best: list[str] = []
+        # Anything below a common ancestor is not a best one. This must not
+        # rely on commit times (they can be equal, or skewed), so mark the
+        # ancestors of every common ancestor. A commit already marked had its
+        # own ancestors marked at the same time, so no work is repeated.
         redundant: set[str] = set()
-        for sha in sorted(common, key=lambda s: (-self.time(s), s)):
+        for sha in common:
             if sha in redundant:
                 continue
-            best.append(sha)
-            # Everything below a best base is not a best base.
             stack = list(self.parents(sha))
             while stack:
                 parent = stack.pop()
                 if parent not in redundant:
                     redundant.add(parent)
                     stack.extend(self.parents(parent))
-        return best
+        return sorted(common - redundant, key=lambda s: (-self.time(s), s))
