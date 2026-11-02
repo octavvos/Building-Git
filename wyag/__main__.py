@@ -4,12 +4,14 @@ import argparse
 import heapq
 import os
 import re
+import subprocess
 import sys
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
-from . import branch, diff, objects, worktree
-from .config import identity
+from . import branch, diff, merge, objects, worktree
+from .config import config_get, identity
+from .history import CommitGraph
 from .index import index_read
 from .objects import GitCommit, GitTree
 from .refs import check_ref_name, head_branch, ref_create, ref_list, ref_resolve
@@ -25,6 +27,8 @@ argsp.add_argument("path", metavar="directory", nargs="?", default=".",
 argsp = subparsers.add_parser("cat-file", help="Print the contents of a repository object.")
 argsp.add_argument("-t", dest="show_type", action="store_true",
                    help="Print the object's type instead.")
+argsp.add_argument("-p", dest="pretty", action="store_true",
+                   help="Pretty-print (the default; accepted for git compatibility).")
 argsp.add_argument("object", help="The object to display: hash, HEAD, branch or tag.")
 
 argsp = subparsers.add_parser("hash-object",
@@ -72,7 +76,22 @@ argsp.add_argument("-r", dest="recursive", action="store_true", help="Remove dir
 argsp.add_argument("paths", nargs="+", metavar="path")
 
 argsp = subparsers.add_parser("commit", help="Record the index as a new commit.")
-argsp.add_argument("-m", dest="message", required=True, help="Commit message.")
+argsp.add_argument("-m", dest="message",
+                   help="Commit message. Without it, an editor opens, as in git.")
+argsp.add_argument("-a", "--all", dest="all", action="store_true",
+                   help="Stage all changes to tracked files first.")
+
+argsp = subparsers.add_parser("merge", help="Join another branch into the current one.")
+argsp.add_argument("--no-ff", dest="no_ff", action="store_true",
+                   help="Create a merge commit even when a fast-forward is possible.")
+argsp.add_argument("--abort", action="store_true", help="Give up a merge with conflicts.")
+argsp.add_argument("-m", dest="message", help="Message for the merge commit.")
+argsp.add_argument("rev", nargs="?", help="Branch or commit to merge.")
+
+argsp = subparsers.add_parser("merge-base", help="Find the best common ancestor.")
+argsp.add_argument("--all", action="store_true", help="Print every best common ancestor.")
+argsp.add_argument("a", help="First commit.")
+argsp.add_argument("b", help="Second commit.")
 
 argsp = subparsers.add_parser("diff", help="Show changes between commits, the index and files.")
 argsp.add_argument("--cached", "--staged", dest="cached", action="store_true",
@@ -175,8 +194,8 @@ def format_date(when: datetime, tz: str) -> str:
 def cmd_log(args: argparse.Namespace) -> None:
     repo = repo_find()
     if args.commit == "HEAD" and ref_resolve(repo, "HEAD") is None:
-        branch = head_branch(repo) or "HEAD"
-        raise Exception(f"your current branch '{branch}' does not have any commits yet")
+        current = head_branch(repo) or "HEAD"
+        raise Exception(f"your current branch '{current}' does not have any commits yet")
 
     start = objects.object_find(repo, args.commit, fmt=b"commit")
 
@@ -240,7 +259,7 @@ def tree_checkout(repo: GitRepository, tree: GitTree, path: str) -> None:
                 with open(dest, "wb") as f:
                     f.write(data)
                 if leaf.mode == b"100755":
-                    os.chmod(dest, 0o755)
+                    worktree.make_executable(dest)
         # Submodules (mode 160000) point to another repository; skip them.
 
 
@@ -281,10 +300,12 @@ def cmd_show_ref(args: argparse.Namespace) -> None:
             print(f"{sha} {ref}")
 
 
-def cleanup_message(message: str) -> str:
-    """Normalize a -m message the way git does: strip trailing whitespace,
-    drop leading/trailing blank lines, collapse runs of blank lines."""
-    lines = [line.rstrip() for line in message.split("\n")]
+def cleanup_message(message: str, strip_comments: bool = False) -> str:
+    """Normalize a message the way git does: strip trailing whitespace,
+    drop leading/trailing blank lines, collapse runs of blank lines, and
+    for messages from the editor, drop lines starting with "#"."""
+    lines = [line.rstrip() for line in message.split("\n")
+             if not (strip_comments and line.startswith("#"))]
     out: list[str] = []
     for line in lines:
         if line or (out and out[-1]):
@@ -343,6 +364,10 @@ def cmd_ls_files(args: argparse.Namespace) -> None:
 
 
 STATUS_WORDS = {"A": "new file", "M": "modified", "D": "deleted"}
+UNMERGED_WORDS = {
+    "UU": "both modified", "AA": "both added", "UD": "deleted by them",
+    "DU": "deleted by us", "AU": "added by us", "UA": "added by them", "DD": "both deleted",
+}
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -352,23 +377,28 @@ def cmd_status(args: argparse.Namespace) -> None:
     if args.short:
         changed = set(st.staged) | set(st.unstaged)
         lines = [(p, f"{st.staged.get(p, ' ')}{st.unstaged.get(p, ' ')} {p}") for p in changed]
-        lines += [(p, f"UU {p}") for p in st.unmerged]
+        lines += [(p, f"{code} {p}") for p, code in st.unmerged.items()]
         for _, line in sorted(lines):
             print(line)
         for p in st.untracked:
             print(f"?? {p}")
         return
 
-    branch = head_branch(repo)
-    if branch:
-        print(f"On branch {branch}")
+    current = head_branch(repo)
+    if current:
+        print(f"On branch {current}")
     else:
         print(f"HEAD detached at {ref_resolve(repo, 'HEAD')[:7]}")
     if ref_resolve(repo, "HEAD") is None:
         print("\nNo commits yet")
+    if os.path.exists(repo.repo_file("MERGE_HEAD")):
+        print("\nYou have unmerged paths." if st.unmerged
+              else "\nAll conflicts fixed but you are still merging.")
+        print("  (use \"wyag commit\" to conclude merge, \"wyag merge --abort\" to give up)")
 
     sections = [
-        ("Unmerged paths:", [f"both modified:   {p}" for p in st.unmerged]),
+        ("Unmerged paths:",
+         [f"{UNMERGED_WORDS[code] + ':':<17}{p}" for p, code in st.unmerged.items()]),
         ("Changes to be committed:",
          [f"{STATUS_WORDS[c] + ':':<12}{p}" for p, c in st.staged.items()]),
         ("Changes not staged for commit:",
@@ -396,9 +426,73 @@ def cmd_rm(args: argparse.Namespace) -> None:
         print(f"rm '{path}'")
 
 
+COMMIT_TEMPLATE = (
+    "\n# Please enter the commit message for your changes. Lines starting\n"
+    "# with '#' will be ignored, and an empty message aborts the commit.\n"
+)
+
+
+def run_editor(repo: GitRepository, initial: str) -> str:
+    """Let the user write a message in their editor, the way git picks it."""
+    editor = (os.environ.get("GIT_EDITOR") or config_get(repo, "core", "editor")
+              or os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi")
+    path = repo.repo_file("COMMIT_EDITMSG")
+    with open(path, "w") as f:
+        f.write(initial)
+    if editor != ":":
+        # Like git, run through the shell so EDITOR="code --wait" works.
+        result = subprocess.run(["sh", "-c", f'{editor} "$@"', editor, path])
+        if result.returncode != 0:
+            raise Exception(f"there was a problem with the editor '{editor}'")
+    with open(path) as f:
+        return f.read()
+
+
 def cmd_commit(args: argparse.Namespace) -> None:
-    _, summary = worktree.commit(repo_find(), cleanup_message(args.message))
+    repo = repo_find()
+    if args.all:
+        worktree.stage_tracked(repo)
+
+    if args.message is not None:
+        message = cleanup_message(args.message)
+    else:
+        merge_msg = repo.repo_file("MERGE_MSG")
+        initial = ""
+        if os.path.exists(merge_msg):
+            with open(merge_msg) as f:
+                initial = f.read()
+        text = run_editor(repo, initial + COMMIT_TEMPLATE)
+        message = cleanup_message(text, strip_comments=True)
+
+    _, summary = worktree.commit(repo, message)
     print(summary)
+
+
+def cmd_merge(args: argparse.Namespace) -> None:
+    repo = repo_find()
+    if args.abort:
+        merge.merge_abort(repo)
+        return
+    if not args.rev:
+        raise Exception("no commit to merge given")
+
+    message = cleanup_message(args.message) if args.message is not None else None
+    lines, conflicted = merge.merge(repo, args.rev, message=message, no_ff=args.no_ff)
+    for line in lines:
+        print(line)
+    if conflicted:
+        sys.exit(1)
+
+
+def cmd_merge_base(args: argparse.Namespace) -> None:
+    repo = repo_find()
+    a = objects.object_find(repo, args.a, fmt=b"commit")
+    b = objects.object_find(repo, args.b, fmt=b"commit")
+    bases = CommitGraph(repo).merge_bases(a, b)
+    if not bases:
+        sys.exit(1)
+    for sha in bases if args.all else bases[:1]:
+        print(sha)
 
 
 def cmd_diff(args: argparse.Namespace) -> None:
@@ -431,6 +525,8 @@ COMMANDS = {
     "init": cmd_init,
     "branch": cmd_branch,
     "diff": cmd_diff,
+    "merge": cmd_merge,
+    "merge-base": cmd_merge_base,
     "switch": cmd_switch,
     "ls-files": cmd_ls_files,
     "status": cmd_status,
