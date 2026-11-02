@@ -8,8 +8,9 @@ import sys
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
-from . import objects
+from . import objects, worktree
 from .config import identity
+from .index import index_read
 from .objects import GitCommit, GitTree
 from .refs import check_ref_name, head_branch, ref_create, ref_list, ref_resolve
 from .repository import GitRepository, repo_create, repo_find
@@ -52,6 +53,26 @@ argsp.add_argument("revs", nargs="+", metavar="rev", help="Revisions to resolve.
 argsp = subparsers.add_parser("show-ref", help="List references and their hashes.")
 argsp.add_argument("--heads", action="store_true", help="Only branches.")
 argsp.add_argument("--tags", action="store_true", help="Only tags.")
+
+argsp = subparsers.add_parser("ls-files", help="List the files in the index.")
+argsp.add_argument("-s", "--stage", dest="stage", action="store_true",
+                   help="Show mode, hash and stage of each entry.")
+
+argsp = subparsers.add_parser("status", help="Show the working tree status.")
+argsp.add_argument("-s", "--short", "--porcelain", dest="short", action="store_true",
+                   help="Two-letter status per file, like git status --porcelain.")
+
+argsp = subparsers.add_parser("add", help="Add file contents to the index.")
+argsp.add_argument("-f", "--force", action="store_true", help="Allow adding ignored files.")
+argsp.add_argument("paths", nargs="+", metavar="path")
+
+argsp = subparsers.add_parser("rm", help="Remove files from the working tree and the index.")
+argsp.add_argument("--cached", action="store_true", help="Only remove from the index.")
+argsp.add_argument("-r", dest="recursive", action="store_true", help="Remove directories.")
+argsp.add_argument("paths", nargs="+", metavar="path")
+
+argsp = subparsers.add_parser("commit", help="Record the index as a new commit.")
+argsp.add_argument("-m", dest="message", required=True, help="Commit message.")
 
 argsp = subparsers.add_parser("tag", help="List tags, or create one.")
 argsp.add_argument("-a", dest="annotate", action="store_true",
@@ -290,8 +311,83 @@ def cmd_tag(args: argparse.Namespace) -> None:
     ref_create(repo, ref, objects.object_write(tag, repo))
 
 
+# --- index ---
+
+def cmd_ls_files(args: argparse.Namespace) -> None:
+    repo = repo_find()
+    for e in index_read(repo).entries:
+        if args.stage:
+            print(f"{e.mode:06o} {e.sha} {e.stage}\t{e.path}")
+        else:
+            print(e.path)
+
+
+STATUS_WORDS = {"A": "new file", "M": "modified", "D": "deleted"}
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    repo = repo_find()
+    st = worktree.status(repo)
+
+    if args.short:
+        changed = set(st.staged) | set(st.unstaged)
+        lines = [(p, f"{st.staged.get(p, ' ')}{st.unstaged.get(p, ' ')} {p}") for p in changed]
+        lines += [(p, f"UU {p}") for p in st.unmerged]
+        for _, line in sorted(lines):
+            print(line)
+        for p in st.untracked:
+            print(f"?? {p}")
+        return
+
+    branch = head_branch(repo)
+    if branch:
+        print(f"On branch {branch}")
+    else:
+        print(f"HEAD detached at {ref_resolve(repo, 'HEAD')[:7]}")
+    if ref_resolve(repo, "HEAD") is None:
+        print("\nNo commits yet")
+
+    sections = [
+        ("Unmerged paths:", [f"both modified:   {p}" for p in st.unmerged]),
+        ("Changes to be committed:",
+         [f"{STATUS_WORDS[c] + ':':<12}{p}" for p, c in st.staged.items()]),
+        ("Changes not staged for commit:",
+         [f"{STATUS_WORDS[c] + ':':<12}{p}" for p, c in st.unstaged.items()]),
+        ("Untracked files:", st.untracked),
+    ]
+    for title, lines in sections:
+        if lines:
+            print(f"\n{title}")
+            for line in lines:
+                print(f"\t{line}")
+
+    if st.clean:
+        print("\nnothing to commit, working tree clean")
+    elif not st.staged:
+        print("\nno changes added to commit")
+
+
+def cmd_add(args: argparse.Namespace) -> None:
+    worktree.add(repo_find(), args.paths, force=args.force)
+
+
+def cmd_rm(args: argparse.Namespace) -> None:
+    for path in worktree.rm(repo_find(), args.paths, args.cached, args.recursive):
+        print(f"rm '{path}'")
+
+
+def cmd_commit(args: argparse.Namespace) -> None:
+    _, summary = worktree.commit(repo_find(), cleanup_message(args.message))
+    print(summary)
+
+
 COMMANDS = {
     "init": cmd_init,
+    "ls-files": cmd_ls_files,
+    "status": cmd_status,
+    "add": cmd_add,
+    "rm": cmd_rm,
+    "commit": cmd_commit,
     "cat-file": cmd_cat_file,
     "hash-object": cmd_hash_object,
     "log": cmd_log,
