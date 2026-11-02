@@ -3,6 +3,8 @@ from __future__ import annotations
 import configparser
 import os
 
+from .pack import Pack, repo_packs
+
 
 class GitRepository:
     """A Git repository: a working tree plus its .git directory."""
@@ -10,6 +12,7 @@ class GitRepository:
     def __init__(self, path: str, force: bool = False) -> None:
         self.worktree = path
         self.gitdir = os.path.join(path, ".git")
+        self._packs: list[Pack] | None = None
 
         if not (force or os.path.isdir(self.gitdir)):
             raise Exception(f"Not a Git repository {path}")
@@ -26,6 +29,13 @@ class GitRepository:
             version = int(self.conf.get("core", "repositoryformatversion"))
             if version != 0:
                 raise Exception(f"Unsupported repositoryformatversion {version}")
+
+    @property
+    def packs(self) -> list[Pack]:
+        """Packfiles in .git/objects/pack, loaded on first use."""
+        if self._packs is None:
+            self._packs = repo_packs(self.gitdir)
+        return self._packs
 
     def repo_path(self, *path: str) -> str:
         """Path inside .git."""

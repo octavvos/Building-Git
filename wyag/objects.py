@@ -186,29 +186,36 @@ OBJECT_TYPES: dict[bytes, type[GitObject]] = {
 
 # --- Storage ---
 
+def object_read_raw(repo: GitRepository, sha: str) -> tuple[bytes, bytes]:
+    """Return (type, data) of an object, whether it is loose or in a packfile."""
+    path = repo.repo_file("objects", sha[0:2], sha[2:])
+    if os.path.isfile(path):
+        with open(path, "rb") as f:
+            raw = zlib.decompress(f.read())
+
+        space = raw.find(b" ")
+        null = raw.find(b"\x00", space)
+        size = int(raw[space + 1:null].decode("ascii"))
+        if size != len(raw) - null - 1:
+            raise Exception(f"Malformed object {sha}: bad length")
+        return raw[0:space], raw[null + 1:]
+
+    # Objects compressed by git gc or git clone live in packfiles.
+    for pack in repo.packs:
+        offset = pack.index.find(sha)
+        if offset is not None:
+            return pack.read_at(offset, lambda base: object_read_raw(repo, base))
+
+    raise Exception(f"Object {sha} not found")
+
+
 def object_read(repo: GitRepository, sha: str) -> GitObject:
     """Read object sha from the repository and return a GitObject."""
-    path = repo.repo_file("objects", sha[0:2], sha[2:])
-    if not os.path.isfile(path):
-        # Objects compressed by git gc or git clone live in packfiles.
-        raise Exception(f"Object {sha} not found (packfiles are not supported yet)")
-
-    with open(path, "rb") as f:
-        raw = zlib.decompress(f.read())
-
-    space = raw.find(b" ")
-    fmt = raw[0:space]
-
-    null = raw.find(b"\x00", space)
-    size = int(raw[space + 1:null].decode("ascii"))
-    if size != len(raw) - null - 1:
-        raise Exception(f"Malformed object {sha}: bad length")
-
+    fmt, data = object_read_raw(repo, sha)
     cls = OBJECT_TYPES.get(fmt)
     if cls is None:
         raise Exception(f"Unknown type {fmt.decode('ascii')} for object {sha}")
-
-    return cls(raw[null + 1:])
+    return cls(data)
 
 
 def object_write(obj: GitObject, repo: GitRepository | None = None) -> str:
@@ -231,6 +238,13 @@ def object_write(obj: GitObject, repo: GitRepository | None = None) -> str:
 
 HASH_RE = re.compile(r"^[0-9a-fA-F]{4,40}$")
 
+# A revision is a name followed by any number of operators:
+#   ~N      the Nth first-parent ancestor   (HEAD~2)
+#   ^N      the Nth parent, ^0 the commit    (HEAD^2 for a merge's second parent)
+#   ^{type} peel tags/commits to a type      (v1^{tree}; ^{} peels tags only)
+REV_RE = re.compile(r"^(?P<base>[^~^]+)(?P<ops>(?:\^\{\w*\}|~\d*|\^\d*)*)$")
+REV_OP_RE = re.compile(r"\^\{(\w*)\}|~(\d*)|\^(\d*)")
+
 
 def object_resolve(repo: GitRepository, name: str) -> list[str]:
     """All hashes a name could refer to: HEAD, a hash prefix, a branch or a tag."""
@@ -247,6 +261,8 @@ def object_resolve(repo: GitRepository, name: str) -> list[str]:
             for entry in os.listdir(prefix_dir):
                 if (name_lower[0:2] + entry).startswith(name_lower):
                     candidates.append(name_lower[0:2] + entry)
+        for pack in repo.packs:
+            candidates.extend(pack.index.with_prefix(name_lower))
 
     for ref in (name, f"refs/tags/{name}", f"refs/heads/{name}", f"refs/remotes/{name}"):
         if ref.startswith("refs/"):
@@ -257,26 +273,15 @@ def object_resolve(repo: GitRepository, name: str) -> list[str]:
     return list(dict.fromkeys(candidates))
 
 
-def object_find(repo: GitRepository, name: str, fmt: bytes | None = None,
+def object_peel(repo: GitRepository, sha: str, fmt: bytes | None, name: str,
                 follow: bool = True) -> str:
-    """Resolve a name to a single hash, optionally peeling it to the given type.
+    """Follow tags (and commits, for fmt=tree) until reaching an object of type fmt.
 
-    For example, object_find(repo, "HEAD", b"tree") returns the tree of the
-    current commit.
+    With fmt=None, only tags are peeled.
     """
-    candidates = object_resolve(repo, name)
-    if not candidates:
-        raise Exception(f"No such object {name}")
-    if len(candidates) > 1:
-        raise Exception(f"Name {name} is ambiguous: {', '.join(candidates)}")
-
-    sha = candidates[0]
-    if fmt is None:
-        return sha
-
     while True:
         obj = object_read(repo, sha)
-        if obj.fmt == fmt:
+        if obj.fmt == fmt or (fmt is None and not isinstance(obj, GitTag)):
             return sha
         if not follow:
             raise Exception(f"{name} is a {obj.fmt.decode()}, not a {fmt.decode()}")
@@ -287,3 +292,46 @@ def object_find(repo: GitRepository, name: str, fmt: bytes | None = None,
             sha = obj.tree
         else:
             raise Exception(f"{name} is a {obj.fmt.decode()}, not a {fmt.decode()}")
+
+
+def commit_parent(repo: GitRepository, sha: str, n: int, name: str) -> str:
+    commit = object_read(repo, object_peel(repo, sha, b"commit", name))
+    if n > len(commit.parents):
+        raise Exception(f"{name}: commit has no parent number {n}")
+    return commit.parents[n - 1]
+
+
+def object_find(repo: GitRepository, name: str, fmt: bytes | None = None,
+                follow: bool = True) -> str:
+    """Resolve a revision to a single hash, optionally peeling it to the given type.
+
+    For example, object_find(repo, "HEAD~1", b"tree") returns the tree of the
+    parent of the current commit.
+    """
+    m = REV_RE.match(name)
+    if not m:
+        raise Exception(f"Invalid revision {name}")
+
+    base = m["base"]
+    candidates = object_resolve(repo, base)
+    if not candidates:
+        raise Exception(f"No such object {base}")
+    if len(candidates) > 1:
+        raise Exception(f"Name {base} is ambiguous: {', '.join(candidates)}")
+    sha = candidates[0]
+
+    for op in REV_OP_RE.finditer(m["ops"]):
+        peel_type, tilde, caret = op.groups()
+        if peel_type is not None:
+            sha = object_peel(repo, sha, peel_type.encode() or None, name)
+        elif tilde is not None:
+            for _ in range(int(tilde or 1)):
+                sha = commit_parent(repo, sha, 1, name)
+        elif caret == "0":
+            sha = object_peel(repo, sha, b"commit", name)
+        else:
+            sha = commit_parent(repo, sha, int(caret or 1), name)
+
+    if fmt is None:
+        return sha
+    return object_peel(repo, sha, fmt, name, follow)
