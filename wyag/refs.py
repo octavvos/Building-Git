@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from .repository import GitRepository
 
@@ -37,6 +38,38 @@ def packed_refs(repo: GitRepository) -> dict[str, str]:
             sha, name = line.split(" ", 1)
             refs[name] = sha
     return refs
+
+
+def ref_list(repo: GitRepository) -> dict[str, str]:
+    """Every ref under refs/ with the hash it points to, sorted by name.
+
+    Loose refs override packed ones, since git writes updates as loose files.
+    """
+    refs = packed_refs(repo)
+    refs_dir = repo.repo_path("refs")
+    for root, _, files in os.walk(refs_dir):
+        for name in files:
+            full = os.path.join(root, name)
+            ref = "refs/" + os.path.relpath(full, refs_dir).replace(os.sep, "/")
+            sha = ref_resolve(repo, ref)
+            if sha:
+                refs[ref] = sha
+    return dict(sorted(refs.items()))
+
+
+# Rules from git check-ref-format, applied to one name such as a tag or branch.
+BAD_REF_RE = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]|\.\.|@\{|//")
+
+
+def check_ref_name(name: str) -> None:
+    if (not name or BAD_REF_RE.search(name) or name.startswith(("-", "/", "."))
+            or name.endswith(("/", ".", ".lock")) or "/." in name or name == "@"):
+        raise Exception(f"'{name}' is not a valid ref name")
+
+
+def ref_create(repo: GitRepository, ref: str, sha: str) -> None:
+    with open(repo.repo_file(*ref.split("/"), mkdir=True), "w") as f:
+        f.write(sha + "\n")
 
 
 def head_branch(repo: GitRepository) -> str | None:

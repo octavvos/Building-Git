@@ -9,8 +9,9 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
 from . import objects
+from .config import identity
 from .objects import GitCommit, GitTree
-from .refs import head_branch, ref_resolve
+from .refs import check_ref_name, head_branch, ref_create, ref_list, ref_resolve
 from .repository import GitRepository, repo_create, repo_find
 
 parser = argparse.ArgumentParser(prog="wyag", description="wyag: a Git implementation in Python.")
@@ -43,6 +44,21 @@ argsp.add_argument("tree", help="A tree-ish: tree, commit, HEAD, branch or tag."
 argsp = subparsers.add_parser("checkout", help="Write a commit's files into an empty directory.")
 argsp.add_argument("commit", help="The commit or tree to check out.")
 argsp.add_argument("path", help="The EMPTY directory to check out into.")
+
+argsp = subparsers.add_parser("rev-parse", help="Turn revisions like HEAD~2 into hashes.")
+argsp.add_argument("--short", action="store_true", help="Print 7-character hashes.")
+argsp.add_argument("revs", nargs="+", metavar="rev", help="Revisions to resolve.")
+
+argsp = subparsers.add_parser("show-ref", help="List references and their hashes.")
+argsp.add_argument("--heads", action="store_true", help="Only branches.")
+argsp.add_argument("--tags", action="store_true", help="Only tags.")
+
+argsp = subparsers.add_parser("tag", help="List tags, or create one.")
+argsp.add_argument("-a", dest="annotate", action="store_true",
+                   help="Create an annotated tag object.")
+argsp.add_argument("-m", dest="message", help="Tag message (implies -a).")
+argsp.add_argument("name", nargs="?", help="Name of the new tag.")
+argsp.add_argument("object", nargs="?", default="HEAD", help="What the tag points to.")
 
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -202,6 +218,78 @@ def cmd_checkout(args: argparse.Namespace) -> None:
     tree_checkout(repo, objects.object_read(repo, sha), os.path.realpath(args.path))
 
 
+# --- refs and tags ---
+
+def cmd_rev_parse(args: argparse.Namespace) -> None:
+    repo = repo_find()
+    for rev in args.revs:
+        sha = objects.object_find(repo, rev)
+        print(sha[:7] if args.short else sha)
+
+
+def cmd_show_ref(args: argparse.Namespace) -> None:
+    repo = repo_find()
+    prefixes = []
+    if args.heads:
+        prefixes.append("refs/heads/")
+    if args.tags:
+        prefixes.append("refs/tags/")
+
+    for ref, sha in ref_list(repo).items():
+        if not prefixes or ref.startswith(tuple(prefixes)):
+            print(f"{sha} {ref}")
+
+
+def cleanup_message(message: str) -> str:
+    """Normalize a -m message the way git does: strip trailing whitespace,
+    drop leading/trailing blank lines, collapse runs of blank lines."""
+    lines = [line.rstrip() for line in message.split("\n")]
+    out: list[str] = []
+    for line in lines:
+        if line or (out and out[-1]):
+            out.append(line)
+    while out and not out[-1]:
+        out.pop()
+    return "\n".join(out) + "\n" if out else ""
+
+
+def cmd_tag(args: argparse.Namespace) -> None:
+    repo = repo_find()
+
+    if args.name is None:
+        for ref in ref_list(repo):
+            if ref.startswith("refs/tags/"):
+                print(ref[len("refs/tags/"):])
+        return
+
+    check_ref_name(args.name)
+    ref = f"refs/tags/{args.name}"
+    if os.path.exists(repo.repo_path(*ref.split("/"))) or ref in ref_list(repo):
+        raise Exception(f"tag '{args.name}' already exists")
+
+    target = objects.object_find(repo, args.object)
+
+    if not (args.annotate or args.message is not None):
+        ref_create(repo, ref, target)
+        return
+
+    if args.message is None:
+        raise Exception("an annotated tag needs a message: use -m")
+    message = cleanup_message(args.message)
+    if not message:
+        raise Exception("tag message is empty")
+
+    tag = objects.GitTag()
+    tag.kvlm = {
+        b"object": [target.encode()],
+        b"type": [objects.object_read(repo, target).fmt],
+        b"tag": [args.name.encode()],
+        b"tagger": [identity(repo, "COMMITTER")],
+        None: message.encode(),
+    }
+    ref_create(repo, ref, objects.object_write(tag, repo))
+
+
 COMMANDS = {
     "init": cmd_init,
     "cat-file": cmd_cat_file,
@@ -209,6 +297,9 @@ COMMANDS = {
     "log": cmd_log,
     "ls-tree": cmd_ls_tree,
     "checkout": cmd_checkout,
+    "rev-parse": cmd_rev_parse,
+    "show-ref": cmd_show_ref,
+    "tag": cmd_tag,
 }
 
 
