@@ -104,11 +104,12 @@ def index_read(repo: GitRepository) -> GitIndex:
         raise Exception("index file is corrupt (bad signature)")
 
     version, count = struct.unpack(">II", raw[4:12])
-    if version not in (2, 3):
-        raise Exception(f"index version {version} is not supported (only 2 and 3)")
+    if version not in (2, 3, 4):
+        raise Exception(f"index version {version} is not supported (only 2, 3 and 4)")
 
     entries = []
     pos = 12
+    previous = b""
     for _ in range(count):
         (ctime_s, ctime_ns, mtime_s, mtime_ns, dev, ino, mode, uid, gid, size,
          sha, flags) = ENTRY_HEAD.unpack_from(raw, pos)
@@ -120,10 +121,20 @@ def index_read(repo: GitRepository) -> GitIndex:
             (extended,) = struct.unpack(">H", raw[pos:pos + 2])
             pos += 2
 
-        null = raw.index(b"\x00", pos)
-        name = raw[pos:null].decode("utf-8")
-        # Entries are padded with 1-8 NUL bytes to a multiple of 8.
-        pos = start + ((null - start) // 8 + 1) * 8
+        if version == 4:
+            # Path compression: drop N bytes from the end of the previous
+            # path, then append the NUL-terminated suffix. No padding.
+            strip, pos = decode_varint(raw, pos)
+            null = raw.index(b"\x00", pos)
+            name_bytes = previous[:len(previous) - strip] + raw[pos:null]
+            pos = null + 1
+        else:
+            null = raw.index(b"\x00", pos)
+            name_bytes = raw[pos:null]
+            # Entries are padded with 1-8 NUL bytes to a multiple of 8.
+            pos = start + ((null - start) // 8 + 1) * 8
+        previous = name_bytes
+        name = name_bytes.decode("utf-8")
 
         entries.append(GitIndexEntry(
             name, sha.hex(), mode, stage=(flags >> FLAG_STAGE_SHIFT) & 0x3,
@@ -145,16 +156,54 @@ def index_read(repo: GitRepository) -> GitIndex:
     return GitIndex(entries)
 
 
+def decode_varint(data: bytes, pos: int) -> tuple[int, int]:
+    """Git's offset varint: big-endian 7-bit groups, each continuation adding 1."""
+    byte = data[pos]
+    pos += 1
+    value = byte & 0x7F
+    while byte & 0x80:
+        byte = data[pos]
+        pos += 1
+        value = ((value + 1) << 7) | (byte & 0x7F)
+    return value, pos
+
+
+def encode_varint(value: int) -> bytes:
+    out = [value & 0x7F]
+    value >>= 7
+    while value:
+        value -= 1
+        out.append(0x80 | (value & 0x7F))
+        value >>= 7
+    return bytes(reversed(out))
+
+
+def on_disk_version(repo: GitRepository) -> int | None:
+    path = repo.repo_file("index")
+    try:
+        with open(path, "rb") as f:
+            header = f.read(8)
+    except FileNotFoundError:
+        return None
+    return struct.unpack(">I", header[4:8])[0] if header[:4] == b"DIRC" else None
+
+
 def index_write(repo: GitRepository, index: GitIndex) -> None:
     """Write the index atomically via index.lock, like git does.
 
-    Extensions are not written: git rebuilds optional ones (such as the
-    cached tree) as needed, and a stale cached tree would be wrong anyway.
+    The repository keeps version 4 if it already uses it; otherwise version 2,
+    or 3 when an entry needs extended flags. Extensions are not written: git
+    rebuilds optional ones (such as the cached tree) as needed, and a stale
+    cached tree would be wrong anyway.
     """
     index.sort()
-    version = 3 if any(e.extended_flags for e in index.entries) else 2
+    if on_disk_version(repo) == 4:
+        version = 4
+    else:
+        version = 3 if any(e.extended_flags for e in index.entries) else 2
 
     out = bytearray(b"DIRC" + struct.pack(">II", version, len(index.entries)))
+    previous = b""
     for e in index.entries:
         name = e.path.encode("utf-8")
         flags = (e.stage << FLAG_STAGE_SHIFT) | min(len(name), NAME_MASK)
@@ -166,8 +215,15 @@ def index_write(repo: GitRepository, index: GitIndex) -> None:
                                e.mode, e.uid, e.gid, e.size, bytes.fromhex(e.sha), flags)
         if e.extended_flags:
             out += struct.pack(">H", e.extended_flags)
-        out += name
-        out += b"\x00" * (8 - (len(out) - start) % 8)
+        if version == 4:
+            common = 0
+            while common < min(len(name), len(previous)) and name[common] == previous[common]:
+                common += 1
+            out += encode_varint(len(previous) - common) + name[common:] + b"\x00"
+            previous = name
+        else:
+            out += name
+            out += b"\x00" * (8 - (len(out) - start) % 8)
 
     out += hashlib.sha1(out).digest()
 
