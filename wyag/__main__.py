@@ -21,10 +21,12 @@ argsp.add_argument("path", metavar="directory", nargs="?", default=".",
                    help="Where to create the repository.")
 
 argsp = subparsers.add_parser("cat-file", help="Print the contents of a repository object.")
-argsp.add_argument("-t", dest="show_type", action="store_true", help="Print the object's type instead.")
+argsp.add_argument("-t", dest="show_type", action="store_true",
+                   help="Print the object's type instead.")
 argsp.add_argument("object", help="The object to display: hash, HEAD, branch or tag.")
 
-argsp = subparsers.add_parser("hash-object", help="Compute an object's hash, optionally storing it.")
+argsp = subparsers.add_parser("hash-object",
+                              help="Compute an object's hash, optionally storing it.")
 argsp.add_argument("path", help="Read the object from this file.")
 argsp.add_argument("-w", dest="write", action="store_true",
                    help="Actually write the object into the repository.")
