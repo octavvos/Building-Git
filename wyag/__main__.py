@@ -399,8 +399,22 @@ COMMANDS = {
 }
 
 
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    """Parse the command line.
+
+    Options may sit between positional arguments, as in "tag -a v1 -m msg HEAD".
+    Before Python 3.12 plain parse_args() rejects that, so each command's own
+    arguments go through parse_intermixed_args().
+    """
+    if argv and argv[0] in subparsers.choices:
+        args = subparsers.choices[argv[0]].parse_intermixed_args(argv[1:])
+        args.command = argv[0]
+        return args
+    return parser.parse_args(argv)  # prints usage or the error
+
+
 def main(argv: list[str] | None = None) -> None:
-    args = parser.parse_args(argv)
+    args = parse_args(sys.argv[1:] if argv is None else list(argv))
     try:
         COMMANDS[args.command](args)
     except Exception as e:
