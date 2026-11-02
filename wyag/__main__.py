@@ -8,7 +8,7 @@ import sys
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
-from . import objects, worktree
+from . import branch, diff, objects, worktree
 from .config import identity
 from .index import index_read
 from .objects import GitCommit, GitTree
@@ -73,6 +73,26 @@ argsp.add_argument("paths", nargs="+", metavar="path")
 
 argsp = subparsers.add_parser("commit", help="Record the index as a new commit.")
 argsp.add_argument("-m", dest="message", required=True, help="Commit message.")
+
+argsp = subparsers.add_parser("diff", help="Show changes between commits, the index and files.")
+argsp.add_argument("--cached", "--staged", dest="cached", action="store_true",
+                   help="Compare the index with HEAD (or the given commit).")
+argsp.add_argument("revs", nargs="*", metavar="rev",
+                   help="No rev: index vs files. One: rev vs files. Two: rev vs rev.")
+
+argsp = subparsers.add_parser("branch", help="List, create or delete branches.")
+argsp.add_argument("-d", dest="delete", action="store_true",
+                   help="Delete a branch (only if it is merged into HEAD).")
+argsp.add_argument("-D", dest="force_delete", action="store_true",
+                   help="Delete a branch even if it is not merged.")
+argsp.add_argument("name", nargs="?", help="Branch to create or delete.")
+argsp.add_argument("start", nargs="?", default="HEAD", help="Where the new branch starts.")
+
+argsp = subparsers.add_parser("switch", help="Switch to another branch.")
+argsp.add_argument("-c", dest="create", action="store_true",
+                   help="Create the branch at HEAD and switch to it.")
+argsp.add_argument("--detach", action="store_true", help="Check out a commit, not a branch.")
+argsp.add_argument("target", help="Branch (or, with --detach, any revision).")
 
 argsp = subparsers.add_parser("tag", help="List tags, or create one.")
 argsp.add_argument("-a", dest="annotate", action="store_true",
@@ -381,8 +401,37 @@ def cmd_commit(args: argparse.Namespace) -> None:
     print(summary)
 
 
+def cmd_diff(args: argparse.Namespace) -> None:
+    out = sys.stdout.buffer
+    for chunk in diff.diff_command(repo_find(), args.revs, args.cached):
+        out.write(chunk)
+
+
+# --- branches ---
+
+def cmd_branch(args: argparse.Namespace) -> None:
+    repo = repo_find()
+    if args.delete or args.force_delete:
+        if not args.name:
+            raise Exception("branch name required")
+        sha = branch.branch_delete(repo, args.name, force=args.force_delete)
+        print(f"Deleted branch {args.name} (was {sha[:7]}).")
+    elif args.name:
+        branch.branch_create(repo, args.name, args.start)
+    else:
+        for line in branch.branch_list(repo):
+            print(line)
+
+
+def cmd_switch(args: argparse.Namespace) -> None:
+    print(branch.switch(repo_find(), args.target, create=args.create, detach=args.detach))
+
+
 COMMANDS = {
     "init": cmd_init,
+    "branch": cmd_branch,
+    "diff": cmd_diff,
+    "switch": cmd_switch,
     "ls-files": cmd_ls_files,
     "status": cmd_status,
     "add": cmd_add,
