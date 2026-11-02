@@ -318,6 +318,27 @@ def test_index_v3_extended_flags(git_repo, monkeypatch, capsysbinary):
         "ls-files", "-s", cwd=git_repo, monkeypatch=monkeypatch, capsysbinary=capsysbinary)
 
 
+def test_index_v4(git_repo, monkeypatch, capsysbinary):
+    """Version 4 compresses each path against the previous one."""
+    git("update-index", "--index-version", "4", cwd=git_repo)
+    out = wyag("ls-files", "-s", cwd=git_repo, monkeypatch=monkeypatch, capsysbinary=capsysbinary)
+    assert out == git("ls-files", "-s", cwd=git_repo)
+
+    (git_repo / "src" / "sub" / "d.txt").write_text("d\n")
+    wyag("add", "src", cwd=git_repo, monkeypatch=monkeypatch, capsysbinary=capsysbinary)
+    with open(git_repo / ".git" / "index", "rb") as f:
+        assert struct.unpack(">I", f.read()[4:8])[0] == 4  # the version is kept
+    assert git("status", "--porcelain", cwd=git_repo) == b"A  src/sub/d.txt\n"
+    assert wyag("ls-files", "-s", cwd=git_repo, monkeypatch=monkeypatch,
+                capsysbinary=capsysbinary) == git("ls-files", "-s", cwd=git_repo)
+
+
+@pytest.mark.parametrize("value", [0, 1, 127, 128, 129, 16511, 16512, 2**21, 2**35])
+def test_varint_roundtrip(value):
+    from wyag.index import decode_varint, encode_varint
+    assert decode_varint(encode_varint(value), 0) == (value, len(encode_varint(value)))
+
+
 def test_index_with_submodule_entry(git_repo, monkeypatch, capsysbinary):
     head = git_text("rev-parse", "HEAD", cwd=git_repo)
     git("update-index", "--add", "--cacheinfo", f"160000,{head},sub", cwd=git_repo)
@@ -333,7 +354,7 @@ def write_index(repo, body):
 
 
 @pytest.mark.parametrize("body, error", [
-    (b"DIRC" + struct.pack(">II", 4, 0), "version 4 is not supported"),
+    (b"DIRC" + struct.pack(">II", 5, 0), "version 5 is not supported"),
     (b"DIRX" + struct.pack(">II", 2, 0), "bad signature"),
     (b"DIRC" + struct.pack(">II", 2, 0) + b"link" + struct.pack(">I", 0),
      "extension link is not supported"),
