@@ -7,34 +7,53 @@
 
 **English** | [O'zbekcha](README.uz.md)
 
-A from-scratch implementation of Git's core in pure Python, built to understand how
-Git actually stores and reads history. It started from
-[Write yourself a Git!](https://wyag.thb.lt/) and goes further: packfiles, the
-binary index, `.gitignore` and revision syntax like `HEAD~2^{tree}`.
+A from-scratch implementation of Git in pure Python, built to understand how Git really
+stores history, tracks changes and merges branches. It started from
+[Write yourself a Git!](https://wyag.thb.lt/) and goes much further: packfiles, the binary
+index, `.gitignore`, branches, diffs and real three-way merges with conflict markers.
 
 wyag reads and writes the same on-disk format as Git, so it works on real repositories,
-including freshly cloned ones. The test suite runs every command next to real `git` and
-checks that the output is the same byte for byte; commits and tags that wyag creates
-have the **same hashes** git would produce and pass `git fsck --strict`.
+including freshly cloned ones, and you can switch between `git` and `wyag` at any point.
+The test suite runs every command next to real `git` and checks the results match:
+commits, tags and merge commits get the **same hashes** git would produce,
+and `status`, `diff`, `log`, `ls-files` and conflict files are compared byte for byte.
 
 ## Commands
+
+**Everyday work**
 
 | Command | What it does |
 |---|---|
 | `init [dir]` | Create an empty repository |
-| `add [-f] path...` | Stage files or whole directories (respects `.gitignore`, stages deletions) |
+| `status [-s]` | Staged, unstaged, untracked and conflicted files; `-s` matches `git status --porcelain` |
+| `add [-f] path...` | Stage files or directories (respects `.gitignore`, stages deletions) |
 | `rm [--cached] [-r] path...` | Unstage and delete files; refuses to drop uncommitted changes |
-| `commit -m msg` | Record the index as a commit and move the current branch |
-| `status [-s]` | Staged, unstaged and untracked changes; `-s` matches `git status --porcelain` |
-| `ls-files [-s]` | List the index |
+| `commit [-a] [-m msg]` | Commit the index; without `-m`, opens your editor like git |
+| `diff [--cached] [rev [rev]]` | Unified diff: files vs index, index vs `HEAD`, or two commits |
 | `log [-n N] [--oneline] [rev]` | History, newest first, including merges |
-| `ls-tree [-r] rev` | List a tree |
-| `cat-file [-t] rev` | Print an object, or its type |
+
+**Branches and merging**
+
+| Command | What it does |
+|---|---|
+| `branch [-d \| -D] [name [start]]` | List, create or delete branches (`-d` only if merged) |
+| `switch [-c] [--detach] target` | Move to a branch, updating files and index safely |
+| `merge [--no-ff] [-m msg] rev` | Fast-forward or three-way merge, with conflict markers |
+| `merge --abort` | Give up a conflicted merge |
+| `merge-base [--all] a b` | Best common ancestor(s) |
+| `tag [-a] [-m msg] [name [rev]]` | List tags, or create a lightweight or annotated one |
+
+**Plumbing**
+
+| Command | What it does |
+|---|---|
+| `cat-file [-t \| -p] rev` | Print an object, or its type |
 | `hash-object [-w] file` | Hash a file as a blob, optionally storing it |
-| `checkout rev dir` | Write a commit's files into an empty directory |
+| `ls-tree [-r] rev` | List a tree |
+| `ls-files [-s]` | List the index, with stages during a conflict |
 | `rev-parse [--short] rev...` | Resolve revisions to hashes |
 | `show-ref [--heads] [--tags]` | List refs |
-| `tag [-a] [-m msg] [name [rev]]` | List tags, or create a lightweight or annotated one |
+| `checkout rev dir` | Export a commit's files into an empty directory |
 
 A `rev` can be a full or short hash, `HEAD`, a branch, a tag, or any of those followed by
 `~N`, `^N` or `^{type}` — for example `HEAD~3`, `HEAD^2` (a merge's second parent) or
@@ -50,43 +69,54 @@ pip install -e ".[dev]"
 
 wyag init demo && cd demo
 echo "hello" > hello.txt
-wyag add .
-wyag commit -m "First commit"
-wyag log
+wyag add . && wyag commit -m "First commit"
 
-# It also works on any existing git repository, packed or not
-cd ~/some-project
-wyag log --oneline -n 5
-wyag status
+wyag switch -c feature
+echo "from feature" >> hello.txt
+wyag commit -a -m "Feature work"
+
+wyag switch master
+wyag merge feature
+wyag log --oneline
 ```
 
-wyag takes the author from `user.name` / `user.email` in your git config, or from the
-`GIT_AUTHOR_*` / `GIT_COMMITTER_*` environment variables, just like git.
+It also works on any existing git repository, packed or not: try `wyag log --oneline -n 5`,
+`wyag status` or `wyag diff HEAD~1 HEAD` in one of your projects.
 
 ## How it works
 
 **Objects.** Git is a content-addressed store. Every object is saved as
-`<type> <size>\0<content>`, zlib-compressed, and named by its SHA-1.
-Blobs hold file contents; trees list a directory as `<mode> <name>\0<20-byte sha>`
-entries (sorted as if directory names ended in `/`, or the hash comes out wrong);
-commits and tags are `key value` header lines, a blank line, then the message.
+`<type> <size>\0<content>`, zlib-compressed, and named by its SHA-1. Blobs hold file
+contents; trees list a directory as `<mode> <name>\0<20-byte sha>` entries (sorted as if
+directory names ended in `/`, or the hash comes out wrong); commits and tags are
+`key value` header lines, a blank line, then the message.
 
-**Packfiles.** `git gc` and `git clone` pack objects into a single file, many of them
-stored as *deltas* — copy/insert instructions against another object. wyag reads the
-`.idx` (v2, including the 64-bit offset table for packs over 2 GiB), finds the object,
-follows `OFS_DELTA` / `REF_DELTA` chains back to a full object and replays them.
+**Packfiles.** `git gc` and `git clone` pack objects into one file, many stored as
+*deltas*: copy/insert instructions against another object. wyag reads the `.idx`
+(including the 64-bit offset table used by packs over 2 GiB), follows `OFS_DELTA` /
+`REF_DELTA` chains back to a full object and replays them.
 
-**The index.** `.git/index` is a binary file listing every staged path with its blob
-hash, mode and `stat()` data. `status` uses the `stat()` data to skip re-hashing
-unchanged files, but re-hashes anything modified in the same second the index was written
-("racy git"), since timestamps can't tell those changes apart. Writes go through
-`index.lock` and an atomic rename, as in git.
+**The index.** `.git/index` is a binary file listing every staged path with its blob hash,
+mode and `stat()` data (versions 2, 3 and the path-compressed version 4). `status` uses the
+`stat()` data to avoid re-hashing unchanged files, but re-hashes anything modified in the
+same second the index was written ("racy git"). Writes go through `index.lock` and an
+atomic rename, as in git.
 
-**Committing.** `commit` turns the flat index into nested tree objects, deepest
-directories first, then writes a commit pointing at the root tree and the previous `HEAD`.
+**Switching branches.** Moving between two commits is a two-way merge: only paths that
+differ between them are touched, local edits to other files are carried along, and the
+switch is refused up front if it would overwrite uncommitted work or an untracked file.
 
-**History.** `log` walks the commit graph with a priority queue ordered by commit time,
-which lists merge histories in the same order as `git log`.
+**Diffs.** Hunks come from Python's `difflib` with git's headers, `\ No newline at end of
+file` markers, binary detection and git's "function name" hunk context. Git uses Myers'
+algorithm with extra heuristics, so on larger edits the hunks can be split differently,
+but every patch applies with `git apply` and produces exactly the target tree.
+
+**Merging.** The merge base comes from walking the commit graph. Each path is then merged
+three ways: if only one side changed it, that side wins; if both changed a text file, a
+*diff3* merge combines the lines, trims what both sides agree on out of the conflict, and
+writes `<<<<<<<` / `=======` / `>>>>>>>` markers where they really disagree. Conflicts go
+into the index as stages 1–3 (base, ours, theirs) with `MERGE_HEAD` and `MERGE_MSG`, so
+`status`, `commit` and even real `git` pick up where wyag left off.
 
 ## Project layout
 
@@ -97,11 +127,15 @@ wyag/
 ├── objects.py      # Blob, commit, tree, tag; reading/writing; revision syntax
 ├── pack.py         # Packfile and .idx reading, delta decoding
 ├── refs.py         # HEAD, branches, tags, packed-refs, ref name rules
-├── index.py        # Reading and writing .git/index (v2 and v3)
+├── index.py        # Reading and writing .git/index (v2, v3, v4)
 ├── ignore.py       # .gitignore, info/exclude and core.excludesFile rules
-├── worktree.py     # status, add, rm, commit
+├── worktree.py     # status, add, rm, commit, updating files from a tree
+├── branch.py       # branch and switch
+├── diff.py         # Unified diffs
+├── merge.py        # diff3 line merge, tree merge, merge/abort
+├── history.py      # Ancestry and merge bases
 └── config.py       # git config lookup and author identity
-tests/              # ~180 tests, most of them comparing against real git
+tests/              # ~260 tests, most of them comparing against real git
 ```
 
 ## Tests
@@ -111,18 +145,20 @@ pytest       # runs with coverage and fails below 90%
 ruff check .
 ```
 
-The tests build repositories with real `git` (merges, annotated tags, symlinks,
-executables, deep delta chains, merge conflicts, submodule entries) and compare wyag's
-output and hashes with git's. `.gitignore` handling is checked against
+The tests build repositories with real `git` (merges, criss-cross histories, annotated
+tags, symlinks, executables, deep delta chains, merge conflicts, submodule entries) and
+compare wyag's output and hashes with git's. `.gitignore` handling is checked against
 `git check-ignore`. CI runs everything on Python 3.9, 3.11 and 3.13.
 
 ## Limitations
 
-- No `branch`, `switch`, `merge`, `diff`, `fetch` or `push` yet; `checkout` only writes a
-  snapshot into an empty directory.
-- `status` doesn't detect renames, and shows every conflict as `UU`.
-- Index version 4 and the split index are not supported (git doesn't use them by default).
-- SHA-1 repositories only; commit messages come from `-m` only.
+- No networking (`clone`, `fetch`, `push`), `rebase`, `stash`, `reset` or reflog.
+- Merges use the first best merge base; git's "recursive" handling of criss-cross
+  histories (merging several bases into a virtual one) and rename detection are not
+  implemented, and a file replaced by a directory on one side is reported as unsupported.
+- `diff` hunks can differ from git's on large edits (see above); there's no rename
+  detection or `--stat`.
+- SHA-1 repositories only.
 
 ## License
 

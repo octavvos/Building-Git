@@ -7,35 +7,55 @@
 
 [English](README.md) | **O'zbekcha**
 
-Git'ning asosiy qismi sof Python'da noldan yozilgan. Maqsad: Git tarixni qanday saqlashi
-va o'qishini ichidan tushunish. Loyiha [Write yourself a Git!](https://wyag.thb.lt/)
-qo'llanmasidan boshlangan va undan ham uzoqqa ketgan: packfile'lar, binar index,
-`.gitignore` va `HEAD~2^{tree}` kabi revision sintaksisi.
+Git sof Python'da noldan yozilgan. Maqsad: Git tarixni qanday saqlashi, o'zgarishlarni
+qanday kuzatishi va branch'larni qanday birlashtirishini ichidan tushunish. Loyiha
+[Write yourself a Git!](https://wyag.thb.lt/) qo'llanmasidan boshlangan va undan ancha
+uzoqqa ketgan: packfile'lar, binar index, `.gitignore`, branch'lar, diff va konflikt
+markerlari bilan haqiqiy uch tomonlama merge.
 
-wyag Git bilan bir xil disk formatida o'qiydi va yozadi, shuning uchun haqiqiy
-repozitoriylarda, jumladan yangi klon qilinganlarida ham ishlaydi. Testlar har bir
-buyruqni haqiqiy `git` bilan yonma-yon ishlatib, natijalar bayt-baytigacha bir xil
-ekanini tekshiradi. wyag yaratgan commit va tag'lar git yaratadiganlari bilan **bir xil
-hash**ga ega va `git fsck --strict` tekshiruvidan o'tadi.
+wyag Git bilan bir xil disk formatida ishlaydi, shuning uchun haqiqiy repozitoriylarda,
+jumladan yangi klon qilinganlarida ham ishlaydi, va istalgan paytda `git` bilan `wyag`
+orasida almashish mumkin. Testlar har bir buyruqni haqiqiy `git` bilan yonma-yon ishlatib,
+natijalarni solishtiradi. Commit, tag va merge commit'lar git yaratadiganlari bilan
+**bir xil hash**ga ega. `status`, `diff`, `log`, `ls-files` va konfliktli fayllar
+bayt-baytigacha solishtiriladi.
 
 ## Buyruqlar
+
+**Kundalik ish**
 
 | Buyruq | Vazifasi |
 |---|---|
 | `init [papka]` | Bo'sh repozitoriy yaratadi |
-| `add [-f] yo'l...` | Fayl yoki papkalarni index'ga qo'shadi (`.gitignore`ni hisobga oladi, o'chirilganlarni ham) |
-| `rm [--cached] [-r] yo'l...` | Fayllarni index'dan va diskdan o'chiradi; saqlanmagan o'zgarishlarni o'chirmaydi |
-| `commit -m xabar` | Index'ni commit qiladi va joriy branch'ni suradi |
-| `status [-s]` | O'zgarishlar holati; `-s` natijasi `git status --porcelain` bilan bir xil |
-| `ls-files [-s]` | Index tarkibi |
-| `log [-n N] [--oneline] [rev]` | Tarix, merge'lar bilan, eng yangisi birinchi |
-| `ls-tree [-r] rev` | Tree tarkibi |
-| `cat-file [-t] rev` | Obyekt tarkibi yoki turi |
+| `status [-s]` | Staged, unstaged, kuzatilmagan va konfliktli fayllar; `-s` = `git status --porcelain` |
+| `add [-f] yo'l...` | Fayl yoki papkalarni index'ga qo'shadi (`.gitignore`ni hisobga oladi) |
+| `rm [--cached] [-r] yo'l...` | Fayllarni o'chiradi; saqlanmagan o'zgarishlarni o'chirmaydi |
+| `commit [-a] [-m xabar]` | Index'ni commit qiladi; `-m`siz git kabi muharrir ochadi |
+| `diff [--cached] [rev [rev]]` | Fayllar↔index, index↔`HEAD` yoki ikki commit orasidagi farq |
+| `log [-n N] [--oneline] [rev]` | Tarix, merge'lar bilan |
+
+**Branch'lar va merge**
+
+| Buyruq | Vazifasi |
+|---|---|
+| `branch [-d \| -D] [nom [boshlanish]]` | Branch'lar ro'yxati, yaratish, o'chirish (`-d` faqat merge qilingan bo'lsa) |
+| `switch [-c] [--detach] maqsad` | Branch'ga o'tish, fayllar va index xavfsiz yangilanadi |
+| `merge [--no-ff] [-m xabar] rev` | Fast-forward yoki uch tomonlama merge, konflikt markerlari bilan |
+| `merge --abort` | Konfliktli merge'ni bekor qilish |
+| `merge-base [--all] a b` | Eng yaxshi umumiy ajdod(lar) |
+| `tag [-a] [-m xabar] [nom [rev]]` | Tag'lar ro'yxati yoki yangi tag |
+
+**Ichki (plumbing) buyruqlar**
+
+| Buyruq | Vazifasi |
+|---|---|
+| `cat-file [-t \| -p] rev` | Obyekt tarkibi yoki turi |
 | `hash-object [-w] fayl` | Fayl hash'i, `-w` bilan saqlaydi |
-| `checkout rev papka` | Commit fayllarini bo'sh papkaga yozadi |
+| `ls-tree [-r] rev` | Tree tarkibi |
+| `ls-files [-s]` | Index tarkibi, konflikt paytida bosqichlar bilan |
 | `rev-parse [--short] rev...` | Revision'larni hash'ga aylantiradi |
 | `show-ref [--heads] [--tags]` | Ref'lar ro'yxati |
-| `tag [-a] [-m xabar] [nom [rev]]` | Tag'lar ro'yxati yoki yangi tag (oddiy yoki annotated) |
+| `checkout rev papka` | Commit fayllarini bo'sh papkaga eksport qiladi |
 
 `rev` sifatida to'liq yoki qisqa hash, `HEAD`, branch, tag, yoki ulardan keyin `~N`,
 `^N`, `^{tur}` ishlatish mumkin. Masalan: `HEAD~3`, `HEAD^2` (merge'ning ikkinchi
@@ -51,44 +71,58 @@ pip install -e ".[dev]"
 
 wyag init demo && cd demo
 echo "salom" > salom.txt
-wyag add .
-wyag commit -m "Birinchi commit"
-wyag log
+wyag add . && wyag commit -m "Birinchi commit"
 
-# Istalgan mavjud git repozitoriyda ham ishlaydi
-cd ~/biror-loyiha
-wyag log --oneline -n 5
-wyag status
+wyag switch -c feature
+echo "feature'dan" >> salom.txt
+wyag commit -a -m "Feature ishi"
+
+wyag switch master
+wyag merge feature
+wyag log --oneline
 ```
 
-Muallif ma'lumotini wyag git config'dagi `user.name` / `user.email`dan yoki
-`GIT_AUTHOR_*` / `GIT_COMMITTER_*` muhit o'zgaruvchilaridan oladi, xuddi git kabi.
+Istalgan mavjud git repozitoriyda ham ishlaydi: o'z loyihangizda
+`wyag log --oneline -n 5`, `wyag status` yoki `wyag diff HEAD~1 HEAD`ni sinab ko'ring.
 
 ## Qanday ishlaydi
 
-**Obyektlar.** Git obyektlarni tarkibiga qarab saqlaydi. Har bir obyekt
-`<tur> <hajm>\0<tarkib>` ko'rinishida zlib bilan siqiladi va SHA-1 bilan nomlanadi.
-Blob — fayl tarkibi. Tree — papka ro'yxati, har bir yozuv `<mode> <nom>\0<20 baytli sha>`
-(papka nomlari `/` bilan tugagandek tartiblanadi, aks holda hash noto'g'ri chiqadi).
-Commit va tag — `kalit qiymat` qatorlari, bo'sh qator va xabar.
+**Obyektlar.** Har bir obyekt `<tur> <hajm>\0<tarkib>` ko'rinishida zlib bilan siqiladi
+va SHA-1 bilan nomlanadi. Blob — fayl tarkibi. Tree — papka ro'yxati,
+`<mode> <nom>\0<20 baytli sha>` yozuvlari (papka nomlari `/` bilan tugagandek
+tartiblanadi, aks holda hash noto'g'ri chiqadi). Commit va tag — `kalit qiymat`
+qatorlari, bo'sh qator va xabar.
 
-**Packfile'lar.** `git gc` va `git clone` obyektlarni bitta faylga yig'adi, ularning
-ko'pi *delta* ko'rinishida saqlanadi: boshqa obyektga nisbatan "nusxa ol / qo'sh"
-ko'rsatmalari. wyag `.idx` faylini o'qiydi (v2, 2 GiB'dan katta pack'lar uchun 64 bitli
-offset jadvali bilan), obyektni topadi, `OFS_DELTA` / `REF_DELTA` zanjirini to'liq
-obyektgacha kuzatib, ko'rsatmalarni qayta bajaradi.
+**Packfile'lar.** `git gc` va `git clone` obyektlarni bitta faylga yig'adi, ko'pini
+*delta* ko'rinishida: boshqa obyektga nisbatan "nusxa ol / qo'sh" ko'rsatmalari. wyag
+`.idx`ni o'qiydi (2 GiB'dan katta pack'lar uchun 64 bitli offset jadvali bilan),
+`OFS_DELTA` / `REF_DELTA` zanjirini to'liq obyektgacha kuzatib, ko'rsatmalarni bajaradi.
 
-**Index.** `.git/index` — har bir staged fayl, uning blob hash'i, mode'i va `stat()`
-ma'lumotlari yozilgan binar fayl. `status` o'zgarmagan fayllarni qayta hash qilmaslik
-uchun `stat()` ma'lumotidan foydalanadi. Lekin index yozilgan soniyaning o'zida
-o'zgartirilgan fayllarni baribir qayta hash qiladi ("racy git"), chunki vaqt belgisi
-bunday o'zgarishni ajrata olmaydi. Index git kabi `index.lock` orqali atomik yoziladi.
+**Index.** `.git/index` — har bir staged fayl, uning hash'i, mode'i va `stat()`
+ma'lumotlari yozilgan binar fayl (2, 3 va yo'llari siqilgan 4-versiya). `status`
+o'zgarmagan fayllarni qayta hash qilmaslik uchun `stat()`dan foydalanadi, lekin index
+yozilgan soniyada o'zgargan fayllarni baribir tekshiradi ("racy git"). Index git kabi
+`index.lock` orqali atomik yoziladi.
 
-**Commit.** `commit` tekis index'dan ichma-ich tree obyektlarini yig'adi (eng chuqur
-papkalardan boshlab), keyin root tree va oldingi `HEAD`ga ishora qiluvchi commit yozadi.
+**Branch almashtirish.** Ikki commit orasida o'tish — ikki tomonlama merge: faqat farq
+qiladigan fayllarga tegiladi, boshqa fayllardagi lokal o'zgarishlar saqlanib qoladi,
+va o'tish saqlanmagan ish yoki kuzatilmagan fayl ustidan yozadigan bo'lsa, hech narsaga
+tegmasdan oldindan rad etiladi.
 
-**Tarix.** `log` commit grafini vaqt bo'yicha tartiblangan navbat (priority queue) bilan
-aylanib chiqadi, shuning uchun merge'li tarixni `git log` bilan bir xil tartibda chiqaradi.
+**Diff.** Hunk'lar Python'ning `difflib` moduli bilan hisoblanadi va git sarlavhalari,
+`\ No newline at end of file`, binar fayllarni aniqlash va git'ning "funksiya nomi"
+konteksti bilan chiqariladi. Git Myers algoritmini qo'shimcha evristikalar bilan
+ishlatadi, shuning uchun katta o'zgarishlarda hunk'lar boshqacha bo'linishi mumkin. Lekin
+har bir patch `git apply` bilan qo'llanadi va aynan kerakli natijani beradi.
+
+**Merge.** Merge asosi commit grafini aylanib topiladi. Keyin har bir fayl uch tomonlama
+birlashtiriladi: faqat bir tomon o'zgartirgan bo'lsa, o'sha tomon olinadi; ikkala tomon
+matnli faylni o'zgartirgan bo'lsa, *diff3* algoritmi qatorlarni birlashtiradi, ikkala
+tomon kelishgan qatorlarni konfliktdan chiqaradi, haqiqiy kelishmovchilik joylariga esa
+`<<<<<<<` / `=======` / `>>>>>>>` markerlarini yozadi. Konfliktlar index'ga 1–3
+bosqichlar (asos, bizniki, ularniki) sifatida, `MERGE_HEAD` va `MERGE_MSG` bilan yoziladi.
+Shuning uchun `status`, `commit` va hatto haqiqiy `git` ham ishni wyag to'xtagan joydan
+davom ettira oladi.
 
 ## Tuzilishi
 
@@ -99,11 +133,15 @@ wyag/
 ├── objects.py      # Blob, commit, tree, tag; o'qish/yozish; revision sintaksisi
 ├── pack.py         # Packfile va .idx o'qish, delta'larni ochish
 ├── refs.py         # HEAD, branch, tag, packed-refs, ref nomi qoidalari
-├── index.py        # .git/index o'qish va yozish (v2 va v3)
+├── index.py        # .git/index o'qish va yozish (v2, v3, v4)
 ├── ignore.py       # .gitignore, info/exclude va core.excludesFile qoidalari
-├── worktree.py     # status, add, rm, commit
+├── worktree.py     # status, add, rm, commit, fayllarni tree'dan yangilash
+├── branch.py       # branch va switch
+├── diff.py         # Unified diff
+├── merge.py        # diff3, tree merge, merge/abort
+├── history.py      # Ajdodlar va merge asosi
 └── config.py       # git config va muallif ma'lumoti
-tests/              # ~180 ta test, ko'pi haqiqiy git bilan solishtiradi
+tests/              # ~260 ta test, ko'pi haqiqiy git bilan solishtiradi
 ```
 
 ## Testlar
@@ -113,20 +151,21 @@ pytest       # coverage bilan ishlaydi, 90% dan past bo'lsa xato beradi
 ruff check .
 ```
 
-Testlar haqiqiy `git` bilan repozitoriylar yaratadi (merge, annotated tag, symlink,
-bajariladigan fayllar, chuqur delta zanjirlari, merge konfliktlari, submodule yozuvlari)
-va wyag natijalari hamda hash'larini git'niki bilan solishtiradi. `.gitignore` qoidalari
-`git check-ignore` bilan tekshiriladi. CI hammasini Python 3.9, 3.11 va 3.13
-versiyalarida ishga tushiradi.
+Testlar haqiqiy `git` bilan repozitoriylar yaratadi (merge'lar, criss-cross tarix,
+annotated tag'lar, symlink, bajariladigan fayllar, chuqur delta zanjirlari, merge
+konfliktlari, submodule yozuvlari) va wyag natijalari hamda hash'larini git'niki bilan
+solishtiradi. `.gitignore` qoidalari `git check-ignore` bilan tekshiriladi. CI hammasini
+Python 3.9, 3.11 va 3.13 versiyalarida ishga tushiradi.
 
 ## Cheklovlar
 
-- `branch`, `switch`, `merge`, `diff`, `fetch` va `push` hali yo'q. `checkout` faqat
-  bo'sh papkaga nusxa yozadi.
-- `status` qayta nomlashlarni aniqlamaydi va har qanday konfliktni `UU` deb ko'rsatadi.
-- Index'ning 4-versiyasi va split index qo'llab-quvvatlanmaydi (git ularni odatda
-  ishlatmaydi).
-- Faqat SHA-1 repozitoriylar; commit xabari faqat `-m` orqali beriladi.
+- Tarmoq (`clone`, `fetch`, `push`), `rebase`, `stash`, `reset` va reflog yo'q.
+- Merge birinchi eng yaxshi asosdan foydalanadi. Git'ning criss-cross tarix uchun
+  "recursive" usuli (bir nechta asosni virtual asosga birlashtirish) va qayta nomlashni
+  aniqlash yo'q. Bir tomonda fayl papkaga aylangan holat qo'llab-quvvatlanmaydi.
+- Katta o'zgarishlarda `diff` hunk'lari git'nikidan farq qilishi mumkin (yuqoriga
+  qarang). Qayta nomlashni aniqlash va `--stat` yo'q.
+- Faqat SHA-1 repozitoriylar.
 
 ## Litsenziya
 
