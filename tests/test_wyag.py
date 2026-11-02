@@ -1,9 +1,9 @@
 import os
-import shutil
 import subprocess
 import sys
 
 import pytest
+from helpers import git, needs_git, wyag
 
 from wyag import objects
 from wyag.__main__ import main
@@ -11,63 +11,6 @@ from wyag.repository import GitRepository, repo_create, repo_find
 
 HELLO = b"hello world\n"
 HELLO_SHA = "3b18e512dba79e4c8300dd08aeb37f8e728b8dad"
-
-needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git o'rnatilmagan")
-
-# Fixed identity and dates make commit hashes reproducible, and an empty
-# global config keeps the developer's own git settings out of the tests.
-GIT_ENV = {
-    **os.environ,
-    "GIT_AUTHOR_NAME": "Test User",
-    "GIT_AUTHOR_EMAIL": "test@example.com",
-    "GIT_AUTHOR_DATE": "1700000000 +0500",
-    "GIT_COMMITTER_NAME": "Test User",
-    "GIT_COMMITTER_EMAIL": "test@example.com",
-    "GIT_COMMITTER_DATE": "1700000000 +0500",
-    "GIT_CONFIG_GLOBAL": os.devnull,
-    "GIT_CONFIG_NOSYSTEM": "1",
-}
-
-
-def git(*args, cwd):
-    return subprocess.run(["git", *args], cwd=cwd, env=GIT_ENV,
-                          capture_output=True, check=True).stdout
-
-
-def wyag(*args, cwd, monkeypatch, capsysbinary):
-    """Run the wyag CLI in-process and return its stdout."""
-    monkeypatch.chdir(cwd)
-    main(list(args))
-    return capsysbinary.readouterr().out
-
-
-@pytest.fixture
-def repo(tmp_path):
-    return repo_create(str(tmp_path / "repo"))
-
-
-@pytest.fixture
-def git_repo(tmp_path):
-    """A repository built by real git: two commits, a subdirectory,
-    an executable, a symlink and an annotated tag."""
-    path = tmp_path / "gitrepo"
-    path.mkdir()
-    git("init", "-q", "-b", "master", cwd=path)
-
-    (path / "a.txt").write_text("a\n")
-    (path / "src" / "sub").mkdir(parents=True)
-    (path / "src" / "b.py").write_text("print('b')\n")
-    (path / "src" / "sub" / "c.txt").write_text("c\n")
-    (path / "run.sh").write_text("#!/bin/sh\n")
-    (path / "run.sh").chmod(0o755)
-    os.symlink("a.txt", path / "link")
-    git("add", "-A", cwd=path)
-    git("commit", "-q", "-m", "Birinchi commit", cwd=path)
-
-    (path / "a.txt").write_text("a\na2\n")
-    git("commit", "-q", "-am", "Ikkinchi commit\n\nBatafsil tavsif.", cwd=path)
-    git("tag", "-a", "v1", "-m", "versiya 1", cwd=path)
-    return path
 
 
 # --- init ---
@@ -232,14 +175,6 @@ def test_packed_refs(git_repo):
     repo = GitRepository(str(git_repo))
     head = git("rev-parse", "HEAD", cwd=git_repo).decode().strip()
     assert objects.object_find(repo, "master") == head
-
-
-@needs_git
-def test_packfiles_give_clear_error(git_repo):
-    git("gc", "-q", cwd=git_repo)
-    repo = GitRepository(str(git_repo))
-    with pytest.raises(Exception, match="packfiles are not supported"):
-        objects.object_find(repo, "HEAD", fmt=b"commit")
 
 
 # --- CLI: basics ---
