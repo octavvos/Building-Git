@@ -43,6 +43,10 @@ def parent_dirs(path: str) -> Iterator[str]:
         yield path
 
 
+def submodule_paths(index: GitIndex) -> set[str]:
+    return {e.path for e in index.entries if e.mode == 0o160000}
+
+
 def trust_exec_bit(repo: GitRepository) -> bool:
     return (config_get(repo, "core", "filemode") or "true").lower() != "false"
 
@@ -55,11 +59,12 @@ def read_worktree_file(full: str, st: os.stat_result) -> bytes:
 
 
 def walk_worktree(repo: GitRepository, ignore: Ignore, tracked: set[str],
-                  start: str = "") -> Iterator[str]:
+                  start: str = "", skip_dirs: set[str] = frozenset()) -> Iterator[str]:
     """Yield every file under start that is tracked or not ignored.
 
     Ignored directories are skipped entirely unless they contain tracked files,
-    so big folders like .venv/ or node_modules/ cost nothing.
+    so big folders like .venv/ or node_modules/ cost nothing. Directories in
+    skip_dirs (submodules, for example) are not entered.
     """
     tracked_dirs = {d for path in tracked for d in parent_dirs(path)}
     stack = [start]
@@ -71,8 +76,8 @@ def walk_worktree(repo: GitRepository, ignore: Ignore, tracked: set[str],
             rel = f"{directory}/{name}" if directory else name
             full = os.path.join(repo.worktree, rel)
             if os.path.isdir(full) and not os.path.islink(full):
-                if rel in tracked:
-                    continue  # a submodule
+                if rel in skip_dirs:
+                    continue
                 if rel in tracked_dirs or not ignore.is_ignored(rel, True):
                     stack.append(rel)
             elif rel in tracked or not ignore.is_ignored(rel, False):
@@ -191,7 +196,9 @@ def status(repo: GitRepository) -> Status:
     tracked = {e.path for e in index.entries}
     tracked_dirs = {d for path in tracked for d in parent_dirs(path)}
     untracked = set()
-    for path in walk_worktree(repo, Ignore(repo), tracked):
+    # Like git, a directory sitting where the index has a file (or a
+    # submodule) is not reported as untracked.
+    for path in walk_worktree(repo, Ignore(repo), tracked, skip_dirs=tracked):
         if path in tracked:
             continue
         shown = path
@@ -234,7 +241,8 @@ def add(repo: GitRepository, paths: list[str], force: bool = False) -> None:
         full = os.path.join(repo.worktree, rel)
 
         if os.path.isdir(full) and not os.path.islink(full):
-            on_disk = set(walk_worktree(repo, ignore, set(entries), rel))
+            on_disk = set(walk_worktree(repo, ignore, set(entries), rel,
+                                        skip_dirs=submodule_paths(index)))
             for p in on_disk:
                 stage_file(repo, entries, p, trust_exec)
             # Tracked files that disappeared from this directory get removed.
