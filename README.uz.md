@@ -1,7 +1,7 @@
 # wyag — Python'da Git
 
 [![tests](https://github.com/octavvos/Building-Git/actions/workflows/tests.yml/badge.svg)](https://github.com/octavvos/Building-Git/actions/workflows/tests.yml)
-![coverage](https://img.shields.io/badge/coverage-96%25-brightgreen)
+![coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/octavvos/Building-Git/badges/coverage.json)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
 [![license](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
@@ -9,26 +9,37 @@
 
 Git'ning asosiy qismi sof Python'da noldan yozilgan. Maqsad: Git tarixni qanday saqlashi
 va o'qishini ichidan tushunish. Loyiha [Write yourself a Git!](https://wyag.thb.lt/)
-qo'llanmasi asosida qurilgan.
+qo'llanmasidan boshlangan va undan ham uzoqqa ketgan: packfile'lar, binar index,
+`.gitignore` va `HEAD~2^{tree}` kabi revision sintaksisi.
 
 wyag Git bilan bir xil disk formatida o'qiydi va yozadi, shuning uchun haqiqiy
-repozitoriylarda ishlaydi. Uning `log`, `ls-tree` va `cat-file` natijalari `git` bilan
-bayt-baytigacha bir xil ekani testlarda tekshiriladi. wyag yozgan commit'lar
-`git fsck --strict` tekshiruvidan o'tadi.
+repozitoriylarda, jumladan yangi klon qilinganlarida ham ishlaydi. Testlar har bir
+buyruqni haqiqiy `git` bilan yonma-yon ishlatib, natijalar bayt-baytigacha bir xil
+ekanini tekshiradi. wyag yaratgan commit va tag'lar git yaratadiganlari bilan **bir xil
+hash**ga ega va `git fsck --strict` tekshiruvidan o'tadi.
 
 ## Buyruqlar
 
 | Buyruq | Vazifasi |
 |---|---|
-| `init [papka]` | Bo'sh repozitoriy yaratadi (`.git`, `HEAD`, `config`, `objects/`, `refs/`) |
-| `hash-object [-w] fayl` | Fayl hash'ini hisoblaydi, `-w` bilan uni `.git/objects`ga yozadi |
-| `cat-file [-t] obyekt` | Obyekt tarkibini, `-t` bilan esa turini chiqaradi |
-| `log [-n N] [--oneline] [commit]` | Tarixni ko'rsatadi, merge'lar bilan birga, eng yangisi birinchi |
-| `ls-tree [-r] tree-ish` | Tree tarkibini chiqaradi, `-r` ichki papkalarga ham kiradi |
-| `checkout commit papka` | Commit fayllarini bo'sh papkaga yozadi |
+| `init [papka]` | Bo'sh repozitoriy yaratadi |
+| `add [-f] yo'l...` | Fayl yoki papkalarni index'ga qo'shadi (`.gitignore`ni hisobga oladi, o'chirilganlarni ham) |
+| `rm [--cached] [-r] yo'l...` | Fayllarni index'dan va diskdan o'chiradi; saqlanmagan o'zgarishlarni o'chirmaydi |
+| `commit -m xabar` | Index'ni commit qiladi va joriy branch'ni suradi |
+| `status [-s]` | O'zgarishlar holati; `-s` natijasi `git status --porcelain` bilan bir xil |
+| `ls-files [-s]` | Index tarkibi |
+| `log [-n N] [--oneline] [rev]` | Tarix, merge'lar bilan, eng yangisi birinchi |
+| `ls-tree [-r] rev` | Tree tarkibi |
+| `cat-file [-t] rev` | Obyekt tarkibi yoki turi |
+| `hash-object [-w] fayl` | Fayl hash'i, `-w` bilan saqlaydi |
+| `checkout rev papka` | Commit fayllarini bo'sh papkaga yozadi |
+| `rev-parse [--short] rev...` | Revision'larni hash'ga aylantiradi |
+| `show-ref [--heads] [--tags]` | Ref'lar ro'yxati |
+| `tag [-a] [-m xabar] [nom [rev]]` | Tag'lar ro'yxati yoki yangi tag (oddiy yoki annotated) |
 
-Obyekt kerak bo'lgan joyda to'liq yoki qisqa hash, `HEAD`, branch yoki tag nomini
-ishlatish mumkin.
+`rev` sifatida to'liq yoki qisqa hash, `HEAD`, branch, tag, yoki ulardan keyin `~N`,
+`^N`, `^{tur}` ishlatish mumkin. Masalan: `HEAD~3`, `HEAD^2` (merge'ning ikkinchi
+ota-commit'i), `v1.0^{tree}`.
 
 ## Ishga tushirish
 
@@ -38,41 +49,61 @@ Python 3.9+ kerak, tashqi kutubxonalar yo'q.
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Istalgan git repozitoriyda ishlatish mumkin
+wyag init demo && cd demo
+echo "salom" > salom.txt
+wyag add .
+wyag commit -m "Birinchi commit"
+wyag log
+
+# Istalgan mavjud git repozitoriyda ham ishlaydi
 cd ~/biror-loyiha
 wyag log --oneline -n 5
-wyag ls-tree -r HEAD
-wyag checkout HEAD /tmp/nusxa
+wyag status
 ```
+
+Muallif ma'lumotini wyag git config'dagi `user.name` / `user.email`dan yoki
+`GIT_AUTHOR_*` / `GIT_COMMITTER_*` muhit o'zgaruvchilaridan oladi, xuddi git kabi.
 
 ## Qanday ishlaydi
 
-Git obyektlarni tarkibiga qarab saqlaydi. Har bir obyekt `<tur> <hajm>\0<tarkib>`
-ko'rinishida zlib bilan siqiladi, `.git/objects/` ichida saqlanadi va SHA-1 hash bilan
-nomlanadi.
+**Obyektlar.** Git obyektlarni tarkibiga qarab saqlaydi. Har bir obyekt
+`<tur> <hajm>\0<tarkib>` ko'rinishida zlib bilan siqiladi va SHA-1 bilan nomlanadi.
+Blob — fayl tarkibi. Tree — papka ro'yxati, har bir yozuv `<mode> <nom>\0<20 baytli sha>`
+(papka nomlari `/` bilan tugagandek tartiblanadi, aks holda hash noto'g'ri chiqadi).
+Commit va tag — `kalit qiymat` qatorlari, bo'sh qator va xabar.
 
-- **Blob**: faylning o'zi.
-- **Tree**: papka ro'yxati. Har bir yozuv `<mode> <nom>\0<20 baytli sha>` ko'rinishida.
-  Git papkalarni nomi `/` bilan tugagandek tartiblaydi. wyag ham shunday qiladi, aks holda
-  tree hash'lari mos kelmaydi.
-- **Commit va tag**: `kalit qiymat` qatorlari, bo'sh qator, keyin xabar. GPG imzosi kabi
-  ko'p qatorli qiymatlar bo'sh joy bilan boshlanadigan qatorlarda davom etadi.
-- **Ref'lar**: `HEAD` va branch'lar hash'ga yoki boshqa ref'ga ishora qiluvchi matn
-  fayllari. `packed-refs` ham qo'llab-quvvatlanadi.
+**Packfile'lar.** `git gc` va `git clone` obyektlarni bitta faylga yig'adi, ularning
+ko'pi *delta* ko'rinishida saqlanadi: boshqa obyektga nisbatan "nusxa ol / qo'sh"
+ko'rsatmalari. wyag `.idx` faylini o'qiydi (v2, 2 GiB'dan katta pack'lar uchun 64 bitli
+offset jadvali bilan), obyektni topadi, `OFS_DELTA` / `REF_DELTA` zanjirini to'liq
+obyektgacha kuzatib, ko'rsatmalarni qayta bajaradi.
 
-`log` commit grafini vaqt bo'yicha tartiblangan navbat (priority queue) bilan aylanib
-chiqadi. Shu tufayli merge'li tarixni `git log` bilan bir xil tartibda chiqaradi.
+**Index.** `.git/index` — har bir staged fayl, uning blob hash'i, mode'i va `stat()`
+ma'lumotlari yozilgan binar fayl. `status` o'zgarmagan fayllarni qayta hash qilmaslik
+uchun `stat()` ma'lumotidan foydalanadi. Lekin index yozilgan soniyaning o'zida
+o'zgartirilgan fayllarni baribir qayta hash qiladi ("racy git"), chunki vaqt belgisi
+bunday o'zgarishni ajrata olmaydi. Index git kabi `index.lock` orqali atomik yoziladi.
+
+**Commit.** `commit` tekis index'dan ichma-ich tree obyektlarini yig'adi (eng chuqur
+papkalardan boshlab), keyin root tree va oldingi `HEAD`ga ishora qiluvchi commit yozadi.
+
+**Tarix.** `log` commit grafini vaqt bo'yicha tartiblangan navbat (priority queue) bilan
+aylanib chiqadi, shuning uchun merge'li tarixni `git log` bilan bir xil tartibda chiqaradi.
 
 ## Tuzilishi
 
 ```
 wyag/
-├── __main__.py     # CLI: argumentlar va buyruqlar
+├── __main__.py     # CLI: argumentlar va natijani chiqarish
 ├── repository.py   # GitRepository, init, repozitoriyni topish
-├── objects.py      # Blob, commit, tree va tag; saqlash; nomlarni aniqlash
-└── refs.py         # HEAD, branch, tag va packed-refs
-tests/
-└── test_wyag.py    # Unit, CLI va haqiqiy git bilan solishtirish testlari
+├── objects.py      # Blob, commit, tree, tag; o'qish/yozish; revision sintaksisi
+├── pack.py         # Packfile va .idx o'qish, delta'larni ochish
+├── refs.py         # HEAD, branch, tag, packed-refs, ref nomi qoidalari
+├── index.py        # .git/index o'qish va yozish (v2 va v3)
+├── ignore.py       # .gitignore, info/exclude va core.excludesFile qoidalari
+├── worktree.py     # status, add, rm, commit
+└── config.py       # git config va muallif ma'lumoti
+tests/              # ~180 ta test, ko'pi haqiqiy git bilan solishtiradi
 ```
 
 ## Testlar
@@ -82,27 +113,20 @@ pytest       # coverage bilan ishlaydi, 90% dan past bo'lsa xato beradi
 ruff check .
 ```
 
-CLI testlarining ko'pi haqiqiy `git` bilan repozitoriy yaratadi (ichki papkalar,
-bajariladigan fayl, symlink, annotated tag, merge) va wyag natijasi bir xil ekanini
-tekshiradi. CI hammasini Python 3.9, 3.11 va 3.13 versiyalarida ishga tushiradi.
+Testlar haqiqiy `git` bilan repozitoriylar yaratadi (merge, annotated tag, symlink,
+bajariladigan fayllar, chuqur delta zanjirlari, merge konfliktlari, submodule yozuvlari)
+va wyag natijalari hamda hash'larini git'niki bilan solishtiradi. `.gitignore` qoidalari
+`git check-ignore` bilan tekshiriladi. CI hammasini Python 3.9, 3.11 va 3.13
+versiyalarida ishga tushiradi.
 
 ## Cheklovlar
 
-- **Packfile'lar hozircha qo'llab-quvvatlanmaydi.** `git gc` yoki `git clone`dan keyin
-  obyektlarning ko'pi packfile'larda bo'ladi. Bunday holatda wyag tushunarli xato
-  chiqaradi. Yangi repozitoriylar va yaqinda commit qilingan obyektlar bilan ishlaydi.
-- Staging area (index) hali yo'q, shuning uchun wyag ishchi papkadan o'zi commit yarata
-  olmaydi.
-- Faqat SHA-1 repozitoriylar.
-
-## Reja
-
-- [x] `init`, `hash-object`, `cat-file`
-- [x] Commit, tree va tag obyektlari; `log`, `ls-tree`, `checkout`
-- [x] Ref'lar: `HEAD`, branch, tag, `packed-refs`
-- [ ] Packfile o'qish (`.idx` v2, delta obyektlar)
-- [ ] `show-ref`, `tag`, `rev-parse`
-- [ ] Index: `ls-files`, `status`, `add`, `rm`, `commit`
+- `branch`, `switch`, `merge`, `diff`, `fetch` va `push` hali yo'q. `checkout` faqat
+  bo'sh papkaga nusxa yozadi.
+- `status` qayta nomlashlarni aniqlamaydi va har qanday konfliktni `UU` deb ko'rsatadi.
+- Index'ning 4-versiyasi va split index qo'llab-quvvatlanmaydi (git ularni odatda
+  ishlatmaydi).
+- Faqat SHA-1 repozitoriylar; commit xabari faqat `-m` orqali beriladi.
 
 ## Litsenziya
 
