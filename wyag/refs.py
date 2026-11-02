@@ -72,6 +72,38 @@ def ref_create(repo: GitRepository, ref: str, sha: str) -> None:
         f.write(sha + "\n")
 
 
+def ref_delete(repo: GitRepository, ref: str) -> None:
+    """Remove a ref, whether it is a loose file or a line in packed-refs."""
+    loose = repo.repo_file(*ref.split("/"))
+    if os.path.isfile(loose):
+        os.remove(loose)
+
+    packed = repo.repo_file("packed-refs")
+    if not os.path.isfile(packed):
+        return
+    with open(packed) as f:
+        lines = f.readlines()
+    kept, skip_peeled = [], False
+    for line in lines:
+        if line.startswith("^"):
+            # A "^sha" line belongs to the annotated tag on the line above it.
+            if not skip_peeled:
+                kept.append(line)
+            continue
+        skip_peeled = line.rstrip("\n").endswith(" " + ref)
+        if not skip_peeled:
+            kept.append(line)
+    if kept != lines:
+        with open(packed, "w") as f:
+            f.writelines(kept)
+
+
+def head_set(repo: GitRepository, branch: str | None = None, sha: str | None = None) -> None:
+    """Point HEAD at a branch, or detach it at a commit."""
+    with open(repo.repo_file("HEAD"), "w") as f:
+        f.write(f"ref: refs/heads/{branch}\n" if branch else f"{sha}\n")
+
+
 def head_branch(repo: GitRepository) -> str | None:
     """Name of the checked-out branch, or None for a detached HEAD."""
     with open(repo.repo_file("HEAD")) as f:

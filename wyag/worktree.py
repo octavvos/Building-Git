@@ -1,4 +1,5 @@
-"""Working with the working tree: status, add, rm and commit."""
+"""Working with the working tree: status, add, rm, commit and updating files
+from a tree (used by switch and merge)."""
 
 from __future__ import annotations
 
@@ -305,6 +306,126 @@ def rm(repo: GitRepository, paths: list[str], cached: bool = False,
     index_write(repo, GitIndex(list(entries.values())
                                + [e for e in index.entries if e.stage > 0]))
     return removed
+
+
+# --- updating the worktree from a tree ---
+
+FileState = tuple  # (mode, sha) as in tree_flatten
+
+
+def remove_worktree_file(repo: GitRepository, path: str) -> None:
+    full = os.path.join(repo.worktree, path)
+    if os.path.lexists(full):
+        os.remove(full)
+    for directory in parent_dirs(path):
+        try:
+            os.rmdir(os.path.join(repo.worktree, directory))
+        except OSError:
+            break  # not empty
+
+
+def write_worktree_file(repo: GitRepository, path: str, mode: int, data: bytes) -> GitIndexEntry:
+    """Write a file (or symlink) and return an index entry describing it."""
+    full = os.path.join(repo.worktree, path)
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    if os.path.isdir(full) and not os.path.islink(full):
+        os.rmdir(full)  # fails, as it should, if something is still inside
+    elif os.path.lexists(full):
+        os.remove(full)
+
+    if mode == 0o120000:
+        os.symlink(os.fsdecode(data), full)
+    else:
+        with open(full, "wb") as f:
+            f.write(data)
+        os.chmod(full, 0o755 if mode == 0o100755 else 0o644)
+    sha = objects.object_write(GitBlob(data))
+    return GitIndexEntry.from_stat(path, sha, mode, os.lstat(full))
+
+
+def check_untracked_in_the_way(repo: GitRepository, ignore: Ignore, index_paths: set[str],
+                               paths: Iterable[str], action: str) -> None:
+    """Refuse to overwrite untracked files, like git does. Ignored files are
+    treated as expendable."""
+    in_the_way = []
+    for path in paths:
+        full = os.path.join(repo.worktree, path)
+        if os.path.isdir(full) and not os.path.islink(full):
+            # A directory where a file should go: only fine if everything in
+            # it is tracked (and so will be removed first).
+            in_the_way += [p for p in walk_worktree(repo, ignore, index_paths, path)
+                           if p not in index_paths]
+        elif os.path.lexists(full) and path not in index_paths \
+                and not ignore.is_ignored(path, False):
+            in_the_way.append(path)
+        for directory in parent_dirs(path):
+            d = os.path.join(repo.worktree, directory)
+            if os.path.lexists(d) and not os.path.isdir(d) and directory not in index_paths:
+                in_the_way.append(directory)
+    if in_the_way:
+        files = "".join(f"\t{p}\n" for p in sorted(set(in_the_way)))
+        raise Exception(f"The following untracked working tree files would be overwritten "
+                        f"by {action}:\n{files}Please move or remove them before you {action}.")
+
+
+def checkout_tree(repo: GitRepository, target: dict[str, FileState], action: str = "checkout",
+                  force: bool = False) -> None:
+    """Make the index and worktree match target, moving from the current HEAD.
+
+    Like git's two-way merge: paths that are the same in HEAD and target keep
+    any local changes; paths that differ must have no local changes, or the
+    whole operation is refused before anything is touched. force=True throws
+    local changes away instead.
+    """
+    index = index_read(repo)
+    if not force and any(e.stage > 0 for e in index.entries):
+        raise Exception("you need to resolve your current index first")
+
+    current = head_files(repo)
+    entries = index.by_path()
+    index_file = repo.repo_file("index")
+    index_mtime = int(os.stat(index_file).st_mtime) if os.path.exists(index_file) else 0
+    trust_exec = trust_exec_bit(repo)
+
+    def staged(path: str) -> FileState | None:
+        e = entries.get(path)
+        return (e.mode, e.sha) if e else None
+
+    changed = sorted(p for p in set(current) | set(target) | set(entries)
+                     if current.get(p) != target.get(p)
+                     or (force and staged(p) != target.get(p)))
+
+    if not force:
+        dirty = []
+        for path in changed:
+            if path in entries and staged(path) not in (current.get(path), target.get(path)):
+                dirty.append(path)  # staged change that would be lost
+            elif path in entries and staged(path) != target.get(path) and \
+                    worktree_changed(repo, entries[path], index_mtime, trust_exec) == "M":
+                dirty.append(path)  # unstaged change that would be lost
+        if dirty:
+            files = "".join(f"\t{p}\n" for p in dirty)
+            raise Exception(f"Your local changes to the following files would be overwritten "
+                            f"by {action}:\n{files}Please commit your changes or stash them "
+                            f"before you {action}.")
+        new_paths = [p for p in changed if p in target and p not in current]
+        check_untracked_in_the_way(repo, Ignore(repo), {e.path for e in index.entries},
+                                   new_paths, action)
+
+    # Deletions first, so a file can be replaced by a directory and vice versa.
+    for path in changed:
+        if path not in target:
+            remove_worktree_file(repo, path)
+            entries.pop(path, None)
+    for path in changed:
+        # If the index already holds the target version, keep the worktree as is.
+        if path in target and (force or staged(path) != target[path]):
+            mode, sha = target[path]
+            data = objects.object_read(repo, sha).serialize()
+            entries[path] = write_worktree_file(repo, path, mode, data)
+
+    conflicts = [] if force else [e for e in index.entries if e.stage > 0]
+    index_write(repo, GitIndex(list(entries.values()) + conflicts))
 
 
 # --- commit ---
